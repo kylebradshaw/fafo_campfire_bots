@@ -1,0 +1,21 @@
+# ── Secrets ───────────────────────────────────────────────────────────────────
+.env
+*.env.local
+
+# ── Build outputs ─────────────────────────────────────────────────────────────
+market_bot/market_bot
+crypto_bot/crypto_bot
+
+# Generic Go binary pattern
+**/[a-z]*_bot
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+*.log
+
+# ── OS / editor noise ─────────────────────────────────────────────────────────
+.claude/
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
