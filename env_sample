@@ -1,0 +1,28 @@
+# campfire-bots environment variables
+# ─────────────────────────────────────────────────────────────────
+# Copy this file to .env.local in each bot's directory and fill in
+# your real values. .env.local is gitignored and will never be committed.
+#
+# URL constructed at runtime: https://CAMPFIRE_DOMAIN/rooms/ROOM_ID/CAMPFIRE_BOT_TOKEN/messages
+# ─────────────────────────────────────────────────────────────────
+
+# Your Campfire instance hostname (no https://, no trailing slash)
+# Found in your browser's address bar when logged into Campfire
+CAMPFIRE_DOMAIN=your-campfire-domain.com
+
+# Bot token — found in Campfire → Account Settings → Bots → (your bot)
+CAMPFIRE_BOT_TOKEN=your-bot-token
+
+# Room IDs — the integer in your Campfire room URL
+# e.g. https://your-campfire-domain.com/rooms/3  →  CAMPFIRE_INVESTING_ROOM_ID=3
+#
+# Used by: crypto_bot, market_bot
+CAMPFIRE_INVESTING_ROOM_ID=#
+
+# Used by: disk_bot
+CAMPFIRE_SERVER_ROOM_ID=#
+
+# ─── disk_bot optional thresholds ────────────────────────────────
+DISK_WARN_PCT=75
+DISK_CRIT_PCT=90
+DISK_MOUNTS=/,/data,/mnt/backup

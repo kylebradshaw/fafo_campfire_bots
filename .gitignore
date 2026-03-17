@@ -13,6 +13,7 @@ crypto_bot/crypto_bot
 *.log
 
 # ── OS / editor noise ─────────────────────────────────────────────────────────
+.playwright-mcp/
 .claude/
 .DS_Store
 Thumbs.db
