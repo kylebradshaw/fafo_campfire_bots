@@ -90,11 +90,19 @@ var gFinanceURLs = map[string]string{
 	"^IXIC": "https://www.google.com/finance/quote/.IXIC:INDEXNASDAQ",
 }
 
-// namedLink wraps displayName in an anchor tag. Used for indexes where the
-// display name ("S&P 500") differs from the Yahoo ticker ("^GSPC").
+// namedLink wraps displayName in an HTML anchor tag (Campfire).
+// Used for indexes where the display name ("S&P 500") differs from the Yahoo ticker ("^GSPC").
 func namedLink(displayName, yahooTicker string) string {
 	if url, ok := gFinanceURLs[yahooTicker]; ok {
 		return fmt.Sprintf(`<a href="%s">%s</a>`, url, displayName)
+	}
+	return displayName
+}
+
+// slackNamedLink returns a Slack mrkdwn link for a major index.
+func slackNamedLink(displayName, yahooTicker string) string {
+	if url, ok := gFinanceURLs[yahooTicker]; ok {
+		return fmt.Sprintf("<%s|%s>", url, displayName)
 	}
 	return displayName
 }
@@ -109,7 +117,7 @@ var yahooToGoogleExchange = map[string]string{
 	"PCX": "NYSEARCA",     // NYSE Arca (ETFs)
 }
 
-// tickerLink wraps a stock ticker in an anchor tag pointing to Google Finance.
+// tickerLink wraps a stock ticker in an HTML anchor tag (Campfire).
 // yahooExchange is the exchange code returned by the Yahoo Finance screener API.
 func tickerLink(symbol, yahooExchange string) string {
 	exchange, ok := yahooToGoogleExchange[yahooExchange]
@@ -117,6 +125,15 @@ func tickerLink(symbol, yahooExchange string) string {
 		exchange = yahooExchange // fall back to raw value
 	}
 	return fmt.Sprintf(`<a href="https://www.google.com/finance/quote/%s:%s">%s</a>`, symbol, exchange, symbol)
+}
+
+// slackTickerLink returns a Slack mrkdwn link for a stock ticker.
+func slackTickerLink(symbol, yahooExchange string) string {
+	exchange, ok := yahooToGoogleExchange[yahooExchange]
+	if !ok {
+		exchange = yahooExchange
+	}
+	return fmt.Sprintf("<https://www.google.com/finance/quote/%s:%s|%s>", symbol, exchange, symbol)
 }
 
 func doYahooRequest(url string) ([]byte, error) {
@@ -131,6 +148,40 @@ func doYahooRequest(url string) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 	return io.ReadAll(resp.Body)
+}
+
+// ─── Destination posting ──────────────────────────────────────────────────────
+
+func postToCampfire(webhookURL, htmlMessage string) error {
+	req, _ := http.NewRequest("POST", webhookURL, bytes.NewBufferString(htmlMessage))
+	// Setting text/html ensures the rich text editor parses the break tags properly
+	req.Header.Set("Content-Type", "text/html; charset=utf-8")
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 && resp.StatusCode != 201 {
+		return fmt.Errorf("status %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func postToSlack(webhookURL, text string) error {
+	payload, _ := json.Marshal(map[string]string{"text": text})
+	req, _ := http.NewRequest("POST", webhookURL, bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func main() {
@@ -152,15 +203,24 @@ func main() {
 	if domain == "" || token == "" || roomID == "" {
 		log.Fatal("CAMPFIRE_DOMAIN, CAMPFIRE_BOT_TOKEN, and CAMPFIRE_INVESTING_ROOM_ID must all be set")
 	}
-	webhookURL := fmt.Sprintf("https://%s/rooms/%s/%s/messages", domain, roomID, token)
+	campfireURL := fmt.Sprintf("https://%s/rooms/%s/%s/messages", domain, roomID, token)
+
+	// ── Slack webhook URL (optional) ──
+	slackURL := os.Getenv("SLACK_INVESTING_WEBHOOK_URL")
+	if slackURL == "" {
+		log.Printf("SLACK_INVESTING_WEBHOOK_URL not set — skipping Slack")
+	}
 
 	dateStr := time.Now().Format("Monday, Jan 02")
 
-	// We use <br> tags because Campfire renders the webhook payload as HTML
-	message := fmt.Sprintf("📈 **Market Summary for %s** 📉<br><br>\n", dateStr)
+	// We use <br> tags because Campfire renders the webhook payload as HTML.
+	// Slack uses plain \n with mrkdwn formatting (*bold*, <url|text> links).
+	campfireMsg := fmt.Sprintf("📈 **Market Summary for %s** 📉<br><br>\n", dateStr)
+	slackMsg := fmt.Sprintf("📈 *Market Summary for %s* 📉\n\n", dateStr)
 
 	// --- 1. Get Major Indexes ---
-	message += "🏛️ **Major Indexes (Previous Close):**<br>\n"
+	campfireMsg += "🏛️ **Major Indexes (Previous Close):**<br>\n"
+	slackMsg += "🏛️ *Major Indexes (Previous Close):*\n"
 	indexes := map[string]string{"S&P 500": "^GSPC", "Dow Jones": "^DJI", "Nasdaq": "^IXIC"}
 
 	for name, ticker := range indexes {
@@ -173,19 +233,22 @@ func main() {
 				meta := data.Chart.Result[0].Meta
 				changePct := ((meta.RegularMarketPrice - meta.PreviousClose) / meta.PreviousClose) * 100
 
-				symbol := "🔴"
+				indicator := "🔴"
 				if changePct >= 0 {
-					symbol = "🟢"
+					indicator = "🟢"
 				}
-				message += fmt.Sprintf("%s %s: %.2f (%+.2f%%)<br>\n", symbol, namedLink(name, ticker), meta.RegularMarketPrice, changePct)
+				campfireMsg += fmt.Sprintf("%s %s: %.2f (%+.2f%%)<br>\n", indicator, namedLink(name, ticker), meta.RegularMarketPrice, changePct)
+				slackMsg += fmt.Sprintf("%s %s: %.2f (%+.2f%%)\n", indicator, slackNamedLink(name, ticker), meta.RegularMarketPrice, changePct)
 				continue
 			}
 		}
-		message += fmt.Sprintf("⚠️ %s: Data unavailable<br>\n", name)
+		campfireMsg += fmt.Sprintf("⚠️ %s: Data unavailable<br>\n", name)
+		slackMsg += fmt.Sprintf("⚠️ %s: Data unavailable\n", name)
 	}
 
 	// --- 2. Get Top 10 Gainers ---
-	message += "<br>\n🚀 **Top 10 Gainers:**<br>\n"
+	campfireMsg += "<br>\n🚀 **Top 10 Gainers:**<br>\n"
+	slackMsg += "\n🚀 *Top 10 Gainers:*\n"
 	gainersURL := "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?formatted=false&lang=en-US&region=US&scrIds=day_gainers&count=10"
 	body, err := doYahooRequest(gainersURL)
 	if err == nil {
@@ -193,13 +256,15 @@ func main() {
 		json.Unmarshal(body, &data)
 		if len(data.Finance.Result) > 0 {
 			for _, q := range data.Finance.Result[0].Quotes {
-				message += fmt.Sprintf("• %s : $%.2f (+%.2f%%)<br>\n", tickerLink(q.Symbol, q.Exchange), q.RegularMarketPrice, q.RegularMarketChangePercent)
+				campfireMsg += fmt.Sprintf("• %s : $%.2f (+%.2f%%)<br>\n", tickerLink(q.Symbol, q.Exchange), q.RegularMarketPrice, q.RegularMarketChangePercent)
+				slackMsg += fmt.Sprintf("• %s : $%.2f (+%.2f%%)\n", slackTickerLink(q.Symbol, q.Exchange), q.RegularMarketPrice, q.RegularMarketChangePercent)
 			}
 		}
 	}
 
 	// --- 3. Get Top 10 Losers ---
-	message += "<br>\n🔻 **Top 10 Losers:**<br>\n"
+	campfireMsg += "<br>\n🔻 **Top 10 Losers:**<br>\n"
+	slackMsg += "\n🔻 *Top 10 Losers:*\n"
 	losersURL := "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved?formatted=false&lang=en-US&region=US&scrIds=day_losers&count=10"
 	body, err = doYahooRequest(losersURL)
 	if err == nil {
@@ -207,29 +272,27 @@ func main() {
 		json.Unmarshal(body, &data)
 		if len(data.Finance.Result) > 0 {
 			for _, q := range data.Finance.Result[0].Quotes {
-				message += fmt.Sprintf("• %s : $%.2f (%.2f%%)<br>\n", tickerLink(q.Symbol, q.Exchange), q.RegularMarketPrice, q.RegularMarketChangePercent)
+				campfireMsg += fmt.Sprintf("• %s : $%.2f (%.2f%%)<br>\n", tickerLink(q.Symbol, q.Exchange), q.RegularMarketPrice, q.RegularMarketChangePercent)
+				slackMsg += fmt.Sprintf("• %s : $%.2f (%.2f%%)\n", slackTickerLink(q.Symbol, q.Exchange), q.RegularMarketPrice, q.RegularMarketChangePercent)
 			}
 		}
 	}
 
 	// --- 4. Send to Campfire ---
-	fmt.Println("Sending to Campfire...")
-	req, _ := http.NewRequest("POST", webhookURL, bytes.NewBufferString(message))
-	// Setting text/html ensures the rich text editor parses the break tags properly
-	req.Header.Set("Content-Type", "text/html; charset=utf-8")
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-
-	if err != nil {
-		fmt.Printf("Failed to connect to webhook: %v\n", err)
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == 200 || resp.StatusCode == 201 {
-		fmt.Println("Successfully posted to Campfire!")
+	log.Printf("Sending to Campfire...")
+	if err := postToCampfire(campfireURL, campfireMsg); err != nil {
+		log.Printf("Campfire post failed: %v", err)
 	} else {
-		fmt.Printf("Campfire returned status: %d\n", resp.StatusCode)
+		log.Printf("Successfully posted to Campfire!")
+	}
+
+	// --- 5. Send to Slack ---
+	if slackURL != "" {
+		log.Printf("Sending to Slack...")
+		if err := postToSlack(slackURL, slackMsg); err != nil {
+			log.Printf("Slack post failed: %v", err)
+		} else {
+			log.Printf("Successfully posted to Slack!")
+		}
 	}
 }
