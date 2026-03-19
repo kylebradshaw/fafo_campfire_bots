@@ -256,6 +256,6 @@ Compiled binaries and `.env.local` files are gitignored.
 
 ---
 
-## Licence
+## License
 
 MIT
