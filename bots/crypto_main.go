@@ -23,6 +23,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -127,6 +128,14 @@ var gFinanceURLs = map[string]string{
 func tickerLink(symbol string) string {
 	if url, ok := gFinanceURLs[symbol]; ok {
 		return fmt.Sprintf(`<a href="%s">%s</a>`, url, symbol)
+	}
+	return symbol
+}
+
+// slackTickerLink returns a Slack mrkdwn link for a ticker symbol.
+func slackTickerLink(symbol string) string {
+	if url, ok := gFinanceURLs[symbol]; ok {
+		return fmt.Sprintf("<%s|%s>", url, symbol)
 	}
 	return symbol
 }
@@ -495,6 +504,68 @@ func buildMessage(btc BTCData, fg FearGreed, stocks []EquityData) string {
 	return b.String()
 }
 
+// ─── Build Slack message ──────────────────────────────────────────────────────
+//
+// Slack uses plain \n line breaks and mrkdwn formatting (*bold*, <url|text>).
+
+func buildSlackMessage(btc BTCData, fg FearGreed, stocks []EquityData) string {
+	now := time.Now().In(mustLoadLocation("America/New_York"))
+	var b strings.Builder
+
+	line := func(s string) { b.WriteString(s + "\n") }
+	gap := func() { b.WriteString("\n") }
+
+	// ── Header ──
+	line("🟠 *CRYPTO BOT* — Bitcoin & BTC-Equity Digest")
+	line(fmt.Sprintf("📅 %s ET", now.Format("Mon Jan 2, 2006  3:04 PM")))
+	line("─────────────────────────────────────")
+	gap()
+
+	// ── BTC ──
+	line(fmt.Sprintf("*₿ %s (BTC/USD)*", slackTickerLink("BTC")))
+	line(fmt.Sprintf("  Price      : $%s  %s %s%.2f%%",
+		commaFmt(btc.Price), arrow(btc.Change24h), sign(btc.Change24h), btc.Change24h))
+	if !math.IsNaN(btc.Move5d) {
+		line(fmt.Sprintf("  5d Move    : %s%s%.2f%%", arrow(btc.Move5d), sign(btc.Move5d), btc.Move5d))
+	}
+	line(fmt.Sprintf("  24h Volume : %s", fmtVol(btc.Volume24h)))
+	line(fmt.Sprintf("  Market Cap : %s", fmtVol(btc.MarketCap)))
+
+	// ── Fear & Greed ──
+	btcSentiment := sentiment(fg.Value, btc.Change24h, btc.Change24h)
+	line(fmt.Sprintf("  Fear/Greed : %d/100 (%s)  →  Sentiment %d/100 %s",
+		fg.Value, fg.Label, btcSentiment, sentimentEmoji(btcSentiment)))
+	gap()
+
+	// ── Equities ──
+	line("*📊 BTC-LINKED EQUITIES*")
+
+	for _, eq := range stocks {
+		s := sentiment(fg.Value, btc.Change24h, eq.ChangePct)
+		gap()
+		line(fmt.Sprintf("  %s  %s", slackTickerLink(eq.Symbol), eq.Label))
+		line(fmt.Sprintf("  Price   : $%-10s  %s %s$%.2f  (%s%.2f%%)",
+			fmt.Sprintf("%.2f", eq.Price),
+			arrow(eq.Change),
+			sign(eq.Change), math.Abs(eq.Change),
+			sign(eq.ChangePct), eq.ChangePct))
+		if !math.IsNaN(eq.Move5d) {
+			line(fmt.Sprintf("  5d Move : %s%s%.2f%%", arrow(eq.Move5d), sign(eq.Move5d), eq.Move5d))
+		}
+		line(fmt.Sprintf("  52wk    : %s", rangeBar(eq.Price, eq.Week52Low, eq.Week52High)))
+		line(fmt.Sprintf("  Volume  : %s shares", fmtShareVol(eq.Volume)))
+		line(fmt.Sprintf("  Sentiment: %d/100 %s", s, sentimentEmoji(s)))
+	}
+
+	// ── Footer ──
+	gap()
+	line("─────────────────────────────────────")
+	line("Sources: CoinGecko · alternative.me · Yahoo Finance")
+	line("STRC/STRK/STRF/STRD = Strategy preferred shares  |  XXI = Twenty One Capital")
+
+	return b.String()
+}
+
 // ─── Post to Campfire ─────────────────────────────────────────────────────────
 //
 // Campfire robot webhooks expect the raw message text as the POST body,
@@ -517,6 +588,25 @@ func postToCampfire(msg string) error {
 	if resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("campfire returned %d: %s", resp.StatusCode, body)
+	}
+	return nil
+}
+
+// ─── Post to Slack ────────────────────────────────────────────────────────────
+
+func postToSlack(webhookURL, text string) error {
+	payload, _ := json.Marshal(map[string]string{"text": text})
+	req, _ := http.NewRequest("POST", webhookURL, bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("slack returned %d: %s", resp.StatusCode, body)
 	}
 	return nil
 }
@@ -588,6 +678,12 @@ func main() {
 	}
 	campfireURL = fmt.Sprintf("https://%s/rooms/%s/%s/messages", domain, roomID, token)
 
+	// ── Slack webhook URL (optional) ──
+	slackURL := os.Getenv("SLACK_INVESTING_WEBHOOK_URL")
+	if slackURL == "" {
+		log.Printf("SLACK_INVESTING_WEBHOOK_URL not set — skipping Slack")
+	}
+
 	// ── Fetch BTC ──
 	log.Println("Fetching BTC price…")
 	btc, err := fetchBTC()
@@ -619,20 +715,33 @@ func main() {
 		time.Sleep(300 * time.Millisecond) // be polite to Yahoo
 	}
 
-	// ── Build message ──
-	msg := buildMessage(btc, fg, stocks)
+	// ── Build messages ──
+	campfireMsg := buildMessage(btc, fg, stocks)
+	slackMsg := buildSlackMessage(btc, fg, stocks)
 
 	if dryRun {
-		fmt.Println("─── DRY RUN — message that would be posted ───")
-		fmt.Println(msg)
+		fmt.Println("─── DRY RUN — Campfire message ───")
+		fmt.Println(campfireMsg)
+		fmt.Println("─── DRY RUN — Slack message ───")
+		fmt.Println(slackMsg)
 		return
 	}
 
-	// ── Post ──
+	// ── Post to Campfire ──
 	log.Println("Posting to Campfire…")
-	if err := postToCampfire(msg); err != nil {
-		log.Printf("Post failed: %v\nFalling back to stdout:\n%s", err, msg)
+	if err := postToCampfire(campfireMsg); err != nil {
+		log.Printf("Campfire post failed: %v\nFalling back to stdout:\n%s", err, campfireMsg)
 		os.Exit(1)
 	}
-	log.Println("✅ Posted successfully.")
+	log.Println("✅ Posted to Campfire.")
+
+	// ── Post to Slack ──
+	if slackURL != "" {
+		log.Println("Posting to Slack…")
+		if err := postToSlack(slackURL, slackMsg); err != nil {
+			log.Printf("Slack post failed: %v", err)
+		} else {
+			log.Println("✅ Posted to Slack.")
+		}
+	}
 }
