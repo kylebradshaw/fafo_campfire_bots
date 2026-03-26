@@ -287,12 +287,12 @@ func main() {
 	}
 
 	// --- 5. Send to Slack ---
-	if slackURL != "" {
-		log.Printf("Sending to Slack...")
-		if err := postToSlack(slackURL, slackMsg); err != nil {
-			log.Printf("Slack post failed: %v", err)
-		} else {
-			log.Printf("Successfully posted to Slack!")
-		}
-	}
+	// if slackURL != "" {
+	// 	log.Printf("Sending to Slack...")
+	// 	if err := postToSlack(slackURL, slackMsg); err != nil {
+	// 		log.Printf("Slack post failed: %v", err)
+	// 	} else {
+	// 		log.Printf("Successfully posted to Slack!")
+	// 	}
+	// }
 }

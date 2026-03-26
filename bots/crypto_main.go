@@ -736,12 +736,12 @@ func main() {
 	log.Println("✅ Posted to Campfire.")
 
 	// ── Post to Slack ──
-	if slackURL != "" {
-		log.Println("Posting to Slack…")
-		if err := postToSlack(slackURL, slackMsg); err != nil {
-			log.Printf("Slack post failed: %v", err)
-		} else {
-			log.Println("✅ Posted to Slack.")
-		}
-	}
+	// if slackURL != "" {
+	// 	log.Println("Posting to Slack…")
+	// 	if err := postToSlack(slackURL, slackMsg); err != nil {
+	// 		log.Printf("Slack post failed: %v", err)
+	// 	} else {
+	// 		log.Println("✅ Posted to Slack.")
+	// 	}
+	// }
 }
